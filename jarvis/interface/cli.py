@@ -18,18 +18,22 @@ console = Console()
 logger = logging.getLogger(__name__)
 
 _COMMANDS = {
-    "/help":    "Show this help message",
-    "/status":  "Show Jarvis internal state and self-model stats",
-    "/memory":  "Show recent long-term memory entries",
-    "/skills":  "List all learned skills",
-    "/search":  "Search the web: /search <query>",
-    "/run":     "Run Python code: /run <code>",
-    "/plan":    "Plan a task: /plan <goal>",
-    "/reflect": "Trigger a manual reflection cycle now",
-    "/voice":   "Toggle voice input mode",
-    "/clear":   "Clear short-term conversation memory",
-    "/save":    "Save a note to memory: /save <text>",
-    "/quit":    "Exit Jarvis",
+    "/help":      "Show this help message",
+    "/status":    "Show Jarvis internal state and self-model stats",
+    "/memory":    "Show recent long-term memory entries",
+    "/consolidate": "Merge redundant memories to keep the store lean",
+    "/skills":    "List all learned skills",
+    "/teach":     "Create a new skill: /teach <one-line description>",
+    "/search":    "Search the web: /search <query>",
+    "/run":       "Run Python code: /run <code>",
+    "/file":      "File ops: /file read|write|list|delete|append <path> [content]",
+    "/plan":      "Plan a task: /plan <goal>",
+    "/execute":   "Plan AND execute a task: /execute <goal>",
+    "/reflect":   "Trigger a manual reflection cycle now",
+    "/voice":     "Toggle voice input mode",
+    "/clear":     "Clear short-term conversation memory",
+    "/save":      "Save a note to memory: /save <text>",
+    "/quit":      "Exit Jarvis",
 }
 
 
@@ -107,19 +111,23 @@ class CLI:
         args = parts[1] if len(parts) > 1 else ""
 
         handlers = {
-            "/help":    lambda: self._cmd_help(),
-            "/status":  lambda: self._cmd_status(),
-            "/memory":  lambda: self._cmd_memory(),
-            "/skills":  lambda: self._cmd_skills(),
-            "/search":  lambda: self._cmd_search(args),
-            "/run":     lambda: self._cmd_run(args),
-            "/plan":    lambda: self._cmd_plan(args),
-            "/reflect": lambda: self._cmd_reflect(),
-            "/voice":   lambda: self._cmd_toggle_voice(),
-            "/clear":   lambda: self._cmd_clear(),
-            "/save":    lambda: self._cmd_save(args),
-            "/quit":    lambda: self._quit(),
-            "/exit":    lambda: self._quit(),
+            "/help":        lambda: self._cmd_help(),
+            "/status":      lambda: self._cmd_status(),
+            "/memory":      lambda: self._cmd_memory(),
+            "/consolidate": lambda: self._cmd_consolidate(),
+            "/skills":      lambda: self._cmd_skills(),
+            "/teach":       lambda: self._cmd_teach(args),
+            "/search":      lambda: self._cmd_search(args),
+            "/run":         lambda: self._cmd_run(args),
+            "/file":        lambda: self._cmd_file(args),
+            "/plan":        lambda: self._cmd_plan(args),
+            "/execute":     lambda: self._cmd_execute(args),
+            "/reflect":     lambda: self._cmd_reflect(),
+            "/voice":       lambda: self._cmd_toggle_voice(),
+            "/clear":       lambda: self._cmd_clear(),
+            "/save":        lambda: self._cmd_save(args),
+            "/quit":        lambda: self._quit(),
+            "/exit":        lambda: self._quit(),
         }
         handler = handlers.get(cmd)
         if handler:
@@ -134,7 +142,7 @@ class CLI:
     def _cmd_help(self) -> None:
         lines = ["[bold]Available commands:[/bold]"]
         for cmd, desc in _COMMANDS.items():
-            lines.append(f"  [cyan]{cmd:<12}[/cyan] {desc}")
+            lines.append(f"  [cyan]{cmd:<14}[/cyan] {desc}")
         console.print("\n".join(lines))
         console.print()
 
@@ -155,6 +163,8 @@ class CLI:
                 (str(len(brain.skill_manager.list_skills())), "green"),
                 (f"\n  Voice mode: ", "white"),
                 ("ON" if self._voice_mode else "OFF", "green" if self._voice_mode else "red"),
+                (f"\n  Fast model: ", "white"),
+                (brain.llm.fast_model, "cyan"),
             ),
             title="[bold blue]Jarvis Status[/bold blue]",
             border_style="blue",
@@ -172,9 +182,31 @@ class CLI:
             console.print(f"[cyan][{tag}][/cyan] ({score:.2f}) {m['text'][:120]}")
         console.print()
 
+    def _cmd_consolidate(self) -> None:
+        console.print("[dim]Consolidating long-term memory…[/dim]")
+        removed = self._brain.long_term.consolidate(self._brain.llm)
+        if removed:
+            console.print(f"[green]Removed {removed} redundant memories. Store is leaner.[/green]")
+        else:
+            console.print("[dim]Nothing to consolidate yet.[/dim]")
+        console.print()
+
     def _cmd_skills(self) -> None:
         desc = self._brain.skill_manager.describe_skills()
         console.print(f"[bold]Skills:[/bold]\n{desc}\n")
+
+    def _cmd_teach(self, description: str) -> None:
+        if not description:
+            console.print("[yellow]Usage: /teach <one-line description of the skill>[/yellow]")
+            return
+        console.print(f"[dim]Creating skill: {description}…[/dim]")
+        name = self._brain._create_skill_with_validation(description)
+        if name:
+            console.print(f"[green]✓ Skill created and validated: [bold]{name}[/bold][/green]")
+            console.print(f"[dim]Use it with: [[SKILL: {name}|args]] in chat, or /skills to list.[/dim]")
+        else:
+            console.print("[red]✗ Failed to create a working skill after multiple attempts.[/red]")
+        console.print()
 
     def _cmd_search(self, query: str) -> None:
         if not query:
@@ -189,11 +221,34 @@ class CLI:
         if not code:
             console.print("[yellow]Usage: /run <python code>[/yellow]")
             return
+        console.print("[dim]Running (with auto-debug)…[/dim]")
         result = self._brain.execute_code(code)
         if result["success"]:
             console.print(f"[green]✓ Output:[/green]\n{result['stdout']}")
         else:
-            console.print(f"[red]✗ Error:[/red] {result['error'] or result['stderr']}")
+            console.print(f"[red]✗ Error:[/red] {result.get('error') or result.get('stderr')}")
+        console.print()
+
+    def _cmd_file(self, args: str) -> None:
+        if not args:
+            console.print(
+                "[yellow]Usage: /file <op> <path> [content]\n"
+                "  ops: read, write, append, list, delete[/yellow]"
+            )
+            return
+        parts = args.split(maxsplit=2)
+        op = parts[0].lower()
+        path = parts[1] if len(parts) > 1 else ""
+        content = parts[2] if len(parts) > 2 else ""
+
+        if op == "list" and not path:
+            path = "."
+
+        try:
+            result = self._brain.manage_file(op, path, content)
+            console.print(Markdown(f"```\n{result}\n```"))
+        except Exception as e:
+            console.print(f"[red]File error: {e}[/red]")
         console.print()
 
     def _cmd_plan(self, goal: str) -> None:
@@ -204,7 +259,54 @@ class CLI:
         review = self._brain.critic.critique_plan(goal, plan.summary())
         console.print(Panel(plan.summary(), title="[bold blue]Plan[/bold blue]", border_style="blue"))
         if review.get("risks"):
-            console.print(f"[yellow]Risks:[/yellow] {'; '.join(review['risks'])}")
+            console.print(f"[yellow]⚠ Risks:[/yellow] {'; '.join(review['risks'])}")
+        if review.get("suggestions"):
+            console.print(f"[cyan]💡 Suggestions:[/cyan] {'; '.join(review['suggestions'])}")
+        console.print()
+        console.print("[dim]Tip: use /execute <goal> to plan AND run automatically.[/dim]")
+        console.print()
+
+    def _cmd_execute(self, goal: str) -> None:
+        if not goal:
+            console.print("[yellow]Usage: /execute <goal>[/yellow]")
+            return
+
+        # Show plan + critic before executing
+        plan = self._brain.make_plan(goal)
+        review = self._brain.critic.critique_plan(goal, plan.summary())
+        console.print(Panel(plan.summary(), title="[bold blue]Execution Plan[/bold blue]", border_style="blue"))
+
+        if not review.get("viable", True):
+            risks = "; ".join(review.get("risks", []))
+            console.print(f"[red]⛔ Plan flagged as unviable: {risks}[/red]")
+            console.print("[yellow]Aborting. Refine your goal or use /plan to inspect.[/yellow]")
+            console.print()
+            return
+
+        if review.get("risks"):
+            console.print(f"[yellow]⚠ Risks:[/yellow] {'; '.join(review['risks'])}")
+
+        console.print("\n[bold cyan]Executing plan…[/bold cyan]\n")
+
+        def on_step(step, result):
+            icon = "✓" if step.status == "done" else "✗"
+            color = "green" if step.status == "done" else "red"
+            console.print(
+                f"  [{color}]{icon}[/{color}] "
+                f"[dim][{step.tool}][/dim] {step.description}"
+            )
+            if result and step.status == "done":
+                preview = result[:200].replace("\n", " ")
+                console.print(f"     [dim]→ {preview}[/dim]")
+
+        completed_plan = self._brain.execute_plan(goal, on_step=on_step)
+
+        status_color = "green" if completed_plan.status == "done" else "yellow"
+        console.print(
+            f"\n[{status_color}]Plan {completed_plan.status}.[/{status_color}]  "
+            f"Steps: {sum(1 for s in completed_plan.steps if s.status == 'done')}/"
+            f"{len(completed_plan.steps)} completed."
+        )
         console.print()
 
     def _cmd_reflect(self) -> None:
@@ -280,13 +382,18 @@ class CLI:
         interactions = sm.get("growth", "total_interactions")
         memories = self._brain.long_term.count()
         skills = len(self._brain.skill_manager.list_skills())
+        fast_model = self._brain.llm._fast_model_name
+        main_model = self._brain.llm.model
         console.print(
             Panel(
                 f"[bold]{name}[/bold] v{version}  |  "
                 f"Memories: [cyan]{memories}[/cyan]  |  "
                 f"Skills: [cyan]{skills}[/cyan]  |  "
                 f"Interactions: [cyan]{interactions}[/cyan]\n"
-                f"[dim]Type [cyan]/help[/cyan] for commands. Type naturally to chat.[/dim]",
+                f"Model: [dim]{main_model}[/dim]  |  "
+                f"Fast model: [dim]{fast_model}[/dim]\n"
+                f"[dim]Type [cyan]/help[/cyan] for commands. "
+                f"Use [cyan][[SEARCH/CODE/FILE/SKILL: ...]][/cyan] inline in chat.[/dim]",
                 border_style="blue",
             )
         )

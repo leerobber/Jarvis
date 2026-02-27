@@ -5,10 +5,14 @@ Before responding: pre-flight reasoning check.
 After responding: post-flight quality assessment.
 These are internal monologue steps hidden from the user but logged and
 used by the learning system.
+
+Uses fast_generate() so internal reasoning runs on the fast/cheap model.
 """
 from __future__ import annotations
 
+import json
 import logging
+import re
 
 from jarvis.config import config
 
@@ -48,8 +52,7 @@ class Metacognition:
             "No explanation — only valid JSON."
         )
         try:
-            raw = self._llm.generate(prompt, temperature=0.1)
-            import json, re
+            raw = self._llm.fast_generate(prompt, temperature=0.1)
             match = re.search(r"\{.*\}", raw, re.DOTALL)
             if match:
                 return json.loads(match.group())
@@ -81,14 +84,13 @@ class Metacognition:
             "You are the self-evaluation module of an AI assistant.\n"
             "Evaluate the following interaction and return ONLY a JSON object.\n\n"
             f"User asked: {user_input}\n\n"
-            f"Assistant responded: {response}\n\n"
+            f"Assistant responded: {response[:800]}\n\n"
             "Return JSON with keys: quality_score (0.0-1.0), strengths (array), "
             "weaknesses (array), improvement_suggestions (array), should_remember (bool).\n"
             "No explanation — only valid JSON."
         )
         try:
-            raw = self._llm.generate(prompt, temperature=0.1)
-            import json, re
+            raw = self._llm.fast_generate(prompt, temperature=0.1)
             match = re.search(r"\{.*\}", raw, re.DOTALL)
             if match:
                 return json.loads(match.group())
@@ -117,8 +119,7 @@ class Metacognition:
             f"Statement: {statement}"
         )
         try:
-            raw = self._llm.generate(prompt, temperature=0.0).strip()
-            import re
+            raw = self._llm.fast_generate(prompt, temperature=0.0).strip()
             match = re.search(r"[01]?\.\d+", raw)
             if match:
                 return float(match.group())

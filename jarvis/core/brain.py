@@ -7,14 +7,27 @@ Interaction loop:
   3. Pre-flight metacognition (what kind of task? how to approach?)
   4. Build messages: meta-prompt + self-description + memories + conversation
   5. Generate response (streaming)
-  6. If response contains code → execute it (if user permits)
-  7. Post-flight metacognition (how well did I do?)
-  8. Update short-term + long-term memory, self-model, introspection
-  9. Every N interactions → trigger reflection cycle
+  6. Parse tool calls embedded in response ([[SEARCH:]], [[CODE:]], [[FILE:]], [[SKILL:]])
+  7. Auto-execute code with retry-on-error debug loop
+  8. Run critic on final response (think-twice loop)
+  9. Post-flight metacognition (how well did I do?)
+  10. Update short-term + long-term memory, self-model, introspection
+  11. Every N interactions → reflection cycle
+  12. Every M interactions → memory consolidation
+
+Tool-call syntax for the LLM:
+  [[SEARCH: <query>]]
+  [[CODE: <python code>]]
+  [[FILE: read|<path>]]
+  [[FILE: write|<path>|<content>]]
+  [[FILE: list|<directory>]]
+  [[SKILL: <name>|<arg1>|<arg2>...]]
+  [[CREATE_SKILL: <one-line description>]]
 """
 from __future__ import annotations
 
 import logging
+import re
 from typing import Generator, Optional
 
 from jarvis.config import config
@@ -30,12 +43,19 @@ from jarvis.capabilities.code_executor import CodeExecutor
 from jarvis.capabilities.web_search import WebSearch
 from jarvis.capabilities.file_manager import FileManager
 from jarvis.capabilities.voice import VoiceIO
-from jarvis.agents.planner import Planner
+from jarvis.agents.planner import Planner, Plan, Step
 from jarvis.agents.critic import Critic
 
 logger = logging.getLogger(__name__)
 
 _AVAILABLE_TOOLS = ["conversation", "code", "web_search", "file", "skill"]
+
+# Regex patterns for inline tool calls
+_RE_SEARCH = re.compile(r"\[\[SEARCH:\s*(.*?)\]\]", re.DOTALL)
+_RE_CODE   = re.compile(r"\[\[CODE:\s*(.*?)\]\]", re.DOTALL)
+_RE_FILE   = re.compile(r"\[\[FILE:\s*(.*?)\]\]", re.DOTALL)
+_RE_SKILL  = re.compile(r"\[\[SKILL:\s*(.*?)\]\]", re.DOTALL)
+_RE_CREATE = re.compile(r"\[\[CREATE_SKILL:\s*(.*?)\]\]", re.DOTALL)
 
 
 class Brain:
@@ -114,18 +134,33 @@ class Brain:
             full_response.append(token)
             yield token
         response = "".join(full_response)
-        self._post_process(user_input, response, pre)
+
+        # Run tool calls — results appended as a follow-up yield
+        tool_output = self._handle_tool_usage(response)
+        if tool_output:
+            yield tool_output
+
+        self._post_process(user_input, response + tool_output, pre)
 
     # ------------------------------------------------------------------
     # Post-processing
     # ------------------------------------------------------------------
 
     def _post_process(self, user_input: str, response: str, pre: dict) -> None:
+        # Think-twice: critic reviews the response and may flag corrections
+        if config.CRITIC_ENABLED and pre.get("complexity") != "low":
+            critique = self.critic.critique_response(user_input, response)
+            if not critique.get("approved", True) and critique.get("issues"):
+                issues = "; ".join(critique["issues"][:3])
+                logger.info(f"Critic flagged issues: {issues}")
+                # Store the critique as a learning note
+                self.long_term.store(
+                    f"Critique of response to '{user_input[:80]}': {issues}",
+                    memory_type="self_critique",
+                )
+
         # Record in short-term memory
         self.short_term.add_assistant(response)
-
-        # Handle tool usage detected in response
-        self._handle_tool_usage(response)
 
         # Post-flight metacognition
         post = self.metacognition.post_flight(user_input, response)
@@ -150,31 +185,284 @@ class Brain:
         for cap in pre.get("required_capabilities", []):
             self.self_model.record_capability_use(cap)
 
-        # Trigger reflection cycle
+        # Periodic reflection
         if (
             config.SELF_IMPROVE_ENABLED
             and self._interaction_count % config.REFLECTION_INTERVAL == 0
         ):
             self._run_reflection()
 
+        # Periodic memory consolidation
+        if (
+            config.MEMORY_CONSOLIDATION_INTERVAL > 0
+            and self._interaction_count % config.MEMORY_CONSOLIDATION_INTERVAL == 0
+        ):
+            removed = self.long_term.consolidate(self.llm)
+            if removed:
+                logger.info(f"Memory consolidation removed {removed} redundant entries.")
+
     # ------------------------------------------------------------------
-    # Tool usage
+    # Tool-call parser — handles inline [[TOOL: ...]] syntax
     # ------------------------------------------------------------------
 
-    def _handle_tool_usage(self, response: str) -> None:
-        """Detect and auto-execute code blocks in the response."""
-        if not config.CODE_EXEC_ENABLED:
-            return
-        blocks = self.code_executor.extract_code_blocks(response)
-        for block in blocks:
-            result = self.code_executor.run(block["code"])
-            if result["stdout"]:
-                # Store execution result in memory
+    def _handle_tool_usage(self, response: str) -> str:
+        """
+        Parse [[TOOL: ...]] calls embedded in the LLM response.
+        Returns a formatted string of tool results (empty string if none triggered).
+        """
+        results: list[str] = []
+
+        # Web search
+        for m in _RE_SEARCH.finditer(response):
+            query = m.group(1).strip()
+            logger.info(f"Tool: SEARCH '{query}'")
+            try:
+                text = self.web_search.search_text(query)
+                self.self_model.record_capability_use("web_search")
+                results.append(f"\n**[Search: {query}]**\n{text}")
+                self.long_term.store(f"Web search '{query}': {text[:400]}", memory_type="web_search")
+            except Exception as e:
+                results.append(f"\n**[Search: {query}]** Error: {e}")
+
+        # Code execution (with auto-debug retry)
+        for m in _RE_CODE.finditer(response):
+            code = m.group(1).strip()
+            logger.info("Tool: CODE execution")
+            result = self._execute_with_debug(code)
+            self.self_model.record_capability_use("code_execution")
+            if result["success"]:
+                results.append(f"\n**[Code output]**\n```\n{result['stdout']}\n```")
+                self.long_term.store(f"Code executed OK: {result['stdout'][:300]}", memory_type="code_result")
+            else:
+                err = result.get("error") or result.get("stderr", "")
+                results.append(f"\n**[Code error]** {err}")
+
+        # File operations
+        for m in _RE_FILE.finditer(response):
+            args = [p.strip() for p in m.group(1).split("|")]
+            op = args[0].lower() if args else ""
+            logger.info(f"Tool: FILE {op}")
+            try:
+                if op == "read" and len(args) >= 2:
+                    content = self.file_manager.read(args[1])
+                    results.append(f"\n**[File: {args[1]}]**\n```\n{content[:1000]}\n```")
+                elif op == "write" and len(args) >= 3:
+                    self.file_manager.write(args[1], args[2])
+                    results.append(f"\n**[File written: {args[1]}]**")
+                elif op == "list":
+                    directory = args[1] if len(args) >= 2 else "."
+                    items = self.file_manager.list(directory)
+                    results.append(f"\n**[Files in {directory}]**\n" + "\n".join(items))
+                elif op == "delete" and len(args) >= 2:
+                    self.file_manager.delete(args[1])
+                    results.append(f"\n**[Deleted: {args[1]}]**")
+                else:
+                    results.append(f"\n**[File]** Unknown op or missing args: {m.group(1)}")
+                self.self_model.record_capability_use("file_management")
+            except Exception as e:
+                results.append(f"\n**[File error]** {e}")
+
+        # Skill invocation
+        for m in _RE_SKILL.finditer(response):
+            parts = [p.strip() for p in m.group(1).split("|")]
+            skill_name = parts[0]
+            skill_args = parts[1:]
+            logger.info(f"Tool: SKILL '{skill_name}'")
+            try:
+                output = self.skill_manager.invoke(skill_name, *skill_args)
+                results.append(f"\n**[Skill: {skill_name}]**\n{output}")
+                self.self_model.record_capability_use("skill_use")
+            except Exception as e:
+                results.append(f"\n**[Skill: {skill_name}]** Error: {e}")
+
+        # Skill creation
+        for m in _RE_CREATE.finditer(response):
+            description = m.group(1).strip()
+            logger.info(f"Tool: CREATE_SKILL '{description}'")
+            name = self._create_skill_with_validation(description)
+            if name:
+                results.append(f"\n**[New skill created: `{name}`]**")
+            else:
+                results.append(f"\n**[Skill creation failed]** Could not generate a working skill.")
+
+        return "".join(results)
+
+    # ------------------------------------------------------------------
+    # Auto-debug code execution — retries with LLM-assisted fixes
+    # ------------------------------------------------------------------
+
+    def _execute_with_debug(self, code: str) -> dict:
+        """
+        Run code; if it fails, ask the LLM to fix it and retry up to
+        CODE_DEBUG_RETRIES times.
+        """
+        result = self.code_executor.run(code)
+        if result["success"] or not config.CODE_EXEC_ENABLED:
+            return result
+
+        max_retries = config.CODE_DEBUG_RETRIES
+        for attempt in range(1, max_retries + 1):
+            error = result.get("stderr") or result.get("error", "unknown error")
+            logger.info(f"Code failed (attempt {attempt}): {error[:120]} — asking LLM to fix…")
+
+            fix_prompt = (
+                f"The following Python code raised an error:\n\n"
+                f"```python\n{code}\n```\n\n"
+                f"Error:\n{error}\n\n"
+                "Fix the code. Return ONLY the corrected Python code inside a ```python block. "
+                "No explanation."
+            )
+            raw = self.llm.fast_generate(fix_prompt, temperature=0.1)
+            blocks = self.code_executor.extract_code_blocks(raw)
+            if blocks:
+                code = blocks[0]["code"]
+            else:
+                # Strip markdown fences if present
+                code = re.sub(r"^```[a-z]*\n?", "", raw.strip(), flags=re.MULTILINE)
+                code = re.sub(r"\n?```$", "", code.strip(), flags=re.MULTILINE)
+
+            result = self.code_executor.run(code)
+            if result["success"]:
+                logger.info(f"Code fixed on attempt {attempt}.")
                 self.long_term.store(
-                    f"Code execution output: {result['stdout'][:500]}",
+                    f"Auto-fixed code after {attempt} attempt(s).",
                     memory_type="code_result",
                 )
-                logger.debug(f"Code stdout: {result['stdout'][:200]}")
+                return result
+
+        logger.warning(f"Code auto-debug exhausted {max_retries} retries.")
+        return result
+
+    # ------------------------------------------------------------------
+    # Skill creation with validation
+    # ------------------------------------------------------------------
+
+    def _create_skill_with_validation(self, description: str, max_attempts: int = 3) -> Optional[str]:
+        """
+        Generate a new skill and validate it runs without crashing.
+        Retries up to max_attempts times.
+        """
+        for attempt in range(1, max_attempts + 1):
+            name = self.skill_manager.create_skill(description)
+            if not name:
+                continue
+            # Validate: try invoking with no args
+            try:
+                self.skill_manager.invoke(name)
+                logger.info(f"Skill '{name}' validated on attempt {attempt}.")
+                return name
+            except Exception as e:
+                logger.warning(f"Skill '{name}' failed validation: {e} — regenerating…")
+                # Remove the broken skill file so it's not re-loaded
+                skill_path = self.skill_manager._skills_dir / f"{name}.py"
+                skill_path.unlink(missing_ok=True)
+                if name in self.skill_manager._loaded:
+                    del self.skill_manager._loaded[name]
+        return None
+
+    # ------------------------------------------------------------------
+    # Plan execution loop
+    # ------------------------------------------------------------------
+
+    def execute_plan(self, goal: str, on_step=None) -> Plan:
+        """
+        Create a plan for goal and execute each step in order.
+        on_step(step, result) is called after each step completes (optional callback).
+        Returns the completed Plan.
+        """
+        plan = self.planner.plan(goal, _AVAILABLE_TOOLS)
+        plan.status = "running"
+        self.self_model.record_capability_use("task_planning")
+
+        # Critic reviews the plan before execution
+        review = self.critic.critique_plan(goal, plan.summary())
+        if not review.get("viable", True):
+            risks = "; ".join(review.get("risks", []))
+            logger.warning(f"Plan flagged as unviable: {risks}")
+
+        context_so_far: list[str] = []
+
+        while not plan.all_done():
+            step = plan.next_step()
+            if step is None:
+                break
+
+            step.status = "running"
+            logger.info(f"Executing step {step.index}: [{step.tool}] {step.description}")
+
+            result = self._execute_step(step, context="\n".join(context_so_far))
+            step.result = result
+            step.status = "done" if result and "Error" not in result[:20] else "failed"
+
+            context_so_far.append(f"Step {step.index} ({step.tool}): {result[:300]}")
+
+            if on_step:
+                on_step(step, result)
+
+            # Store step result in memory
+            self.long_term.store(
+                f"Plan step '{step.description}' → {result[:400]}",
+                memory_type="plan_step",
+            )
+
+        plan.status = "done" if all(s.status == "done" for s in plan.steps) else "failed"
+        return plan
+
+    def _execute_step(self, step: Step, context: str = "") -> str:
+        """Dispatch a single plan step to the right tool."""
+        tool = step.tool
+        desc = step.description
+
+        if tool == "web_search":
+            try:
+                return self.web_search.search_text(desc)
+            except Exception as e:
+                return f"Error: {e}"
+
+        elif tool == "code":
+            # Ask LLM to write code for this step given context
+            code_prompt = (
+                f"Write Python code to accomplish this task:\n{desc}\n\n"
+                f"Context from previous steps:\n{context or 'None'}\n\n"
+                "Return ONLY a ```python block. No explanation."
+            )
+            raw = self.llm.generate(code_prompt, temperature=0.2)
+            blocks = self.code_executor.extract_code_blocks(raw)
+            if not blocks:
+                return "Error: LLM did not return a code block."
+            result = self._execute_with_debug(blocks[0]["code"])
+            if result["success"]:
+                return result["stdout"] or "(no output)"
+            return f"Error: {result.get('error') or result.get('stderr')}"
+
+        elif tool == "file":
+            args = step.args
+            op = args.get("op", "read")
+            path = args.get("path", "")
+            try:
+                if op == "read":
+                    return self.file_manager.read(path)
+                elif op == "list":
+                    return "\n".join(self.file_manager.list(path or "."))
+                else:
+                    return f"Unsupported file op in plan step: {op}"
+            except Exception as e:
+                return f"Error: {e}"
+
+        elif tool == "skill":
+            skill_name = step.args.get("skill_name", desc.split()[0])
+            try:
+                return str(self.skill_manager.invoke(skill_name))
+            except Exception as e:
+                return f"Error: {e}"
+
+        else:  # "conversation" — ask the LLM to handle this step
+            prompt = (
+                f"Complete the following task step:\n{desc}\n\n"
+                f"Context from previous steps:\n{context or 'None'}\n\n"
+                "Give a concise, actionable answer."
+            )
+            return self.llm.generate(prompt, temperature=0.4)
 
     # ------------------------------------------------------------------
     # Reflection cycle
@@ -212,6 +500,19 @@ class Brain:
         if approach:
             parts.append(f"\n## Current task strategy\n{approach}")
 
+        parts.append(
+            "\n## Inline tool calls\n"
+            "You may embed tool calls directly in your response using these tags:\n"
+            "  [[SEARCH: <query>]]          — search the web\n"
+            "  [[CODE: <python code>]]      — execute Python (auto-debugged on error)\n"
+            "  [[FILE: read|<path>]]        — read a file from workspace\n"
+            "  [[FILE: write|<path>|<text>]] — write a file to workspace\n"
+            "  [[FILE: list|<dir>]]         — list files in workspace directory\n"
+            "  [[SKILL: <name>|<arg>...]]   — invoke a loaded skill\n"
+            "  [[CREATE_SKILL: <desc>]]     — generate and save a new skill\n"
+            "Results will be appended automatically after your response."
+        )
+
         return "\n".join(parts)
 
     # ------------------------------------------------------------------
@@ -220,15 +521,36 @@ class Brain:
 
     def execute_code(self, code: str) -> dict:
         self.self_model.record_capability_use("code_execution")
-        return self.code_executor.run(code)
+        return self._execute_with_debug(code)
 
     def search_web(self, query: str) -> str:
         self.self_model.record_capability_use("web_search")
         return self.web_search.search_text(query)
 
-    def make_plan(self, goal: str):
+    def make_plan(self, goal: str) -> Plan:
         self.self_model.record_capability_use("task_planning")
         return self.planner.plan(goal, _AVAILABLE_TOOLS)
+
+    def manage_file(self, op: str, path: str, content: str = "") -> str:
+        """Direct file manager access for CLI commands."""
+        self.self_model.record_capability_use("file_management")
+        op = op.lower()
+        if op == "read":
+            return self.file_manager.read(path)
+        elif op == "write":
+            self.file_manager.write(path, content)
+            return f"Written: {path}"
+        elif op == "append":
+            self.file_manager.append(path, content)
+            return f"Appended: {path}"
+        elif op == "list":
+            items = self.file_manager.list(path or ".")
+            return "\n".join(items) if items else "(empty)"
+        elif op == "delete":
+            self.file_manager.delete(path)
+            return f"Deleted: {path}"
+        else:
+            return f"Unknown file op: {op}"
 
     def listen(self) -> Optional[str]:
         self.self_model.record_capability_use("voice_interaction")

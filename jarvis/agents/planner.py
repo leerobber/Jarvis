@@ -1,6 +1,8 @@
 """
 Planner — decomposes complex tasks into an ordered list of steps
 and identifies which capability/tool each step requires.
+
+Uses fast_generate() for the decomposition step.
 """
 from __future__ import annotations
 
@@ -42,7 +44,8 @@ class Plan:
         lines = [f"Goal: {self.goal}"]
         for s in self.steps:
             icon = {"pending": "○", "running": "→", "done": "✓", "failed": "✗"}.get(s.status, "?")
-            lines.append(f"  {icon} [{s.tool}] {s.description}")
+            result_preview = f"  → {s.result[:80]}" if s.result else ""
+            lines.append(f"  {icon} [{s.tool}] {s.description}{result_preview}")
         return "\n".join(lines)
 
 
@@ -66,7 +69,7 @@ class Planner:
             "No explanation — only valid JSON."
         )
         try:
-            raw = self._llm.generate(prompt, temperature=0.2)
+            raw = self._llm.fast_generate(prompt, temperature=0.2)
             match = re.search(r"\{.*\}", raw, re.DOTALL)
             if match:
                 data = json.loads(match.group())

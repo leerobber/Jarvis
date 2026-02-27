@@ -1,5 +1,10 @@
 """
 Ollama client — wraps the local Ollama API for chat, generation, and embeddings.
+
+Model routing:
+  - self.model       → main chat model (large, high-quality)
+  - self.fast_model  → internal reasoning model (smaller/faster).
+                       Set OLLAMA_FAST_MODEL in .env; falls back to main model.
 """
 from __future__ import annotations
 
@@ -18,6 +23,10 @@ class OllamaClient:
         self.client = ollama.Client(host=config.OLLAMA_HOST)
         self.model = config.OLLAMA_MODEL
         self.embed_model = config.OLLAMA_EMBED_MODEL
+        # Fast model used for internal reasoning (metacognition, critic, planner).
+        # Falls back to the main model if not configured or not available.
+        self._fast_model_name: str = config.OLLAMA_FAST_MODEL or self.model
+        self._fast_model_verified: bool = False
 
     # ------------------------------------------------------------------
     # Health
@@ -43,6 +52,23 @@ class OllamaClient:
                         logger.debug(chunk["status"])
         except Exception as e:
             logger.warning(f"Could not pull model '{target}': {e}")
+
+    @property
+    def fast_model(self) -> str:
+        """Return the fast model name, verifying it exists on first access."""
+        if not self._fast_model_verified:
+            try:
+                available = [m.model for m in self.client.list().models]
+                if not any(self._fast_model_name in m for m in available):
+                    logger.info(
+                        f"Fast model '{self._fast_model_name}' not found — "
+                        f"falling back to '{self.model}' for reasoning."
+                    )
+                    self._fast_model_name = self.model
+            except Exception:
+                self._fast_model_name = self.model
+            self._fast_model_verified = True
+        return self._fast_model_name
 
     # ------------------------------------------------------------------
     # Chat (streaming + non-streaming)
@@ -83,9 +109,19 @@ class OllamaClient:
     # ------------------------------------------------------------------
 
     def generate(self, prompt: str, model: Optional[str] = None, temperature: float = 0.3) -> str:
+        """Generate using the main model (or explicit override)."""
         target = model or self.model
         response = self.client.generate(
             model=target,
+            prompt=prompt,
+            options={"temperature": temperature},
+        )
+        return response.response
+
+    def fast_generate(self, prompt: str, temperature: float = 0.1) -> str:
+        """Generate using the fast/reasoning model — cheaper for internal steps."""
+        response = self.client.generate(
+            model=self.fast_model,
             prompt=prompt,
             options={"temperature": temperature},
         )

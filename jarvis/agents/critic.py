@@ -1,6 +1,8 @@
 """
 Critic — evaluates Jarvis's own plans and responses before finalising them.
 Implements a "think twice" loop to catch errors and improve output quality.
+
+Uses fast_generate() so critiques run on the fast/cheap model.
 """
 from __future__ import annotations
 
@@ -27,7 +29,7 @@ class Critic:
         prompt = (
             "You are a quality-control module reviewing an AI assistant's draft response.\n\n"
             f"User asked: {user_input}\n\n"
-            f"Draft response:\n{draft}\n\n"
+            f"Draft response:\n{draft[:1200]}\n\n"
             "Check for: factual errors, missing information, unclear logic, "
             "unnecessarily verbose wording, unhelpful tone.\n\n"
             "Return ONLY JSON with keys:\n"
@@ -37,7 +39,7 @@ class Critic:
             "Only valid JSON — no markdown."
         )
         try:
-            raw = self._llm.generate(prompt, temperature=0.1)
+            raw = self._llm.fast_generate(prompt, temperature=0.1)
             match = re.search(r"\{.*\}", raw, re.DOTALL)
             if match:
                 return json.loads(match.group())
@@ -66,7 +68,7 @@ class Critic:
             "Only valid JSON — no markdown."
         )
         try:
-            raw = self._llm.generate(prompt, temperature=0.1)
+            raw = self._llm.fast_generate(prompt, temperature=0.1)
             match = re.search(r"\{.*\}", raw, re.DOTALL)
             if match:
                 return json.loads(match.group())
@@ -92,7 +94,7 @@ class Critic:
             "Only valid JSON."
         )
         try:
-            raw = self._llm.generate(prompt, temperature=0.0)
+            raw = self._llm.fast_generate(prompt, temperature=0.0)
             match = re.search(r"\{.*\}", raw, re.DOTALL)
             if match:
                 return json.loads(match.group())

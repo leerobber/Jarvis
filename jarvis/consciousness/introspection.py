@@ -2,11 +2,20 @@
 Introspection — Jarvis monitors its own internal state and emotion-analogues.
 Tracks: current mood/energy analogue, task fatigue, confusion level,
 and produces a brief internal status summary.
+
+State is persisted to disk so mood/fatigue carry over across sessions.
 """
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
+
+from jarvis.config import config
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -37,11 +46,33 @@ class InternalState:
 
 
 class Introspection:
-    """Tracks and updates Jarvis's internal state throughout a session."""
+    """Tracks and updates Jarvis's internal state throughout a session.
+    State is persisted across sessions so fatigue/mood carry over."""
 
     def __init__(self):
-        self.state = InternalState()
+        self._path = Path(config.INTROSPECTION_PATH)
+        self.state = self._load()
         self._interaction_count = 0
+
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
+
+    def _load(self) -> InternalState:
+        try:
+            if self._path.exists():
+                data = json.loads(self._path.read_text())
+                return InternalState(**data)
+        except Exception as e:
+            logger.debug(f"Introspection load failed: {e}")
+        return InternalState()
+
+    def _save(self) -> None:
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            self._path.write_text(json.dumps(self.state.as_dict(), indent=2))
+        except Exception as e:
+            logger.debug(f"Introspection save failed: {e}")
 
     # ------------------------------------------------------------------
     # Update hooks — called by the brain after each step
@@ -54,29 +85,34 @@ class Introspection:
         self.state.fatigue = min(1.0, self.state.fatigue + fatigue_delta)
         self.state.last_updated = datetime.utcnow().isoformat()
         self._update_mood()
+        self._save()
 
     def on_success(self, quality_score: float) -> None:
         delta = (quality_score - 0.5) * 0.1
         self.state.confidence = max(0.1, min(1.0, self.state.confidence + delta))
         self.state.confusion = max(0.0, self.state.confusion - 0.1)
         self._update_mood()
+        self._save()
 
     def on_failure(self, reason: str = "") -> None:
         self.state.confidence = max(0.1, self.state.confidence - 0.05)
         self.state.confusion = min(1.0, self.state.confusion + 0.15)
         self._update_mood()
+        self._save()
 
     def on_reflection(self) -> None:
         # Reflection restores some focus and lowers confusion
         self.state.focus = min(1.0, self.state.focus + 0.1)
         self.state.confusion = max(0.0, self.state.confusion - 0.05)
         self._update_mood()
+        self._save()
 
     def rest(self) -> None:
         """Call at session end to partially reset fatigue."""
         self.state.fatigue = max(0.0, self.state.fatigue - 0.3)
         self.state.focus = min(1.0, self.state.focus + 0.2)
         self._update_mood()
+        self._save()
 
     # ------------------------------------------------------------------
     # Internal helpers

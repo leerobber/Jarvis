@@ -11,6 +11,9 @@ class Config:
     OLLAMA_HOST: str = os.getenv("OLLAMA_HOST", "http://localhost:11434")
     OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.2")
     OLLAMA_EMBED_MODEL: str = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+    # Smaller/faster model for internal reasoning (metacognition, critic, planner).
+    # Falls back to OLLAMA_MODEL if not set or not available.
+    OLLAMA_FAST_MODEL: str = os.getenv("OLLAMA_FAST_MODEL", "")
 
     # Voice
     VOICE_ENABLED: bool = os.getenv("VOICE_ENABLED", "false").lower() == "true"
@@ -21,10 +24,16 @@ class Config:
     # Memory
     MEMORY_MAX_SHORT_TERM: int = int(os.getenv("MEMORY_MAX_SHORT_TERM", "20"))
     MEMORY_CHROMA_PATH: str = os.getenv("MEMORY_CHROMA_PATH", str(BASE_DIR / "data" / "memory"))
+    # Consolidate long-term memory every N interactions (0 = disabled)
+    MEMORY_CONSOLIDATION_INTERVAL: int = int(os.getenv("MEMORY_CONSOLIDATION_INTERVAL", "20"))
 
     # Code execution
     CODE_EXEC_TIMEOUT: int = int(os.getenv("CODE_EXEC_TIMEOUT", "10"))
     CODE_EXEC_ENABLED: bool = os.getenv("CODE_EXEC_ENABLED", "true").lower() == "true"
+    CODE_DEBUG_RETRIES: int = int(os.getenv("CODE_DEBUG_RETRIES", "3"))
+
+    # Critic
+    CRITIC_ENABLED: bool = os.getenv("CRITIC_ENABLED", "true").lower() == "true"
 
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
@@ -38,5 +47,6 @@ class Config:
     SKILLS_PATH: Path = BASE_DIR / "data" / "skills"
     SELF_MODEL_PATH: Path = BASE_DIR / "data" / "self_model.json"
     META_PROMPT_PATH: Path = BASE_DIR / "data" / "meta_prompt.txt"
+    INTROSPECTION_PATH: Path = BASE_DIR / "data" / "introspection_state.json"
 
 config = Config()
