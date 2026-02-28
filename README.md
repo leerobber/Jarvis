@@ -141,6 +141,7 @@ jarvis --help
 | `/goals` | Show current goals |
 | `/goals <text>` | Append a new goal (shown in every system prompt) |
 | `/goals clear` | Clear all goals |
+| `/history` | Show the current conversation context window |
 | `/voice` | Toggle voice input/output |
 | `/clear` | Clear short-term conversation memory |
 | `/save <text>` | Save a note to long-term memory |
@@ -160,6 +161,7 @@ The LLM can invoke tools by embedding tags anywhere in its response:
 | `[[SKILL: <name>\|<arg>...]]` | Invoke a loaded skill |
 | `[[CREATE_SKILL: <desc>]]` | Generate and save a new reusable skill |
 | `[[PLAN: <goal>]]` | Decompose a goal into a step-by-step plan |
+| `[[MEMO: <text>]]` | Explicitly save a fact to long-term memory |
 
 ---
 
@@ -175,6 +177,9 @@ The LLM can invoke tools by embedding tags anywhere in its response:
 | `REFLECTION_INTERVAL` | `5` | Reflect every N interactions |
 | `CODE_EXEC_ENABLED` | `true` | Allow sandboxed code execution |
 | `MEMORY_MAX_SHORT_TERM` | `20` | Conversation window size |
+| `CONTEXT_COMPRESS_ENABLED` | `true` | Summarise old turns when context window fills up |
+| `PROACTIVE_SEARCH_ENABLED` | `true` | Auto-search web when pre-flight confidence is low |
+| `PROACTIVE_SEARCH_CONFIDENCE_THRESHOLD` | `0.35` | Confidence level below which proactive search fires |
 
 ---
 

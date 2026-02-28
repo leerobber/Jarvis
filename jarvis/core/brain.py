@@ -24,6 +24,7 @@ Tool-call syntax for the LLM:
   [[SKILL: <name>|<arg1>|<arg2>...]]
   [[CREATE_SKILL: <one-line description>]]
   [[PLAN: <goal>]]
+  [[MEMO: <text to remember>]]
 """
 from __future__ import annotations
 
@@ -58,6 +59,7 @@ _RE_FILE   = re.compile(r"\[\[FILE:\s*(.*?)\]\]", re.DOTALL)
 _RE_SKILL  = re.compile(r"\[\[SKILL:\s*(.*?)\]\]", re.DOTALL)
 _RE_CREATE = re.compile(r"\[\[CREATE_SKILL:\s*(.*?)\]\]", re.DOTALL)
 _RE_PLAN   = re.compile(r"\[\[PLAN:\s*(.*?)\]\]", re.DOTALL)
+_RE_MEMO   = re.compile(r"\[\[MEMO:\s*(.*?)\]\]", re.DOTALL)
 
 
 class Brain:
@@ -101,6 +103,9 @@ class Brain:
         self._interaction_count += 1
         self.self_model.increment_interactions()
 
+        # 0. Compress context window before it silently loses old turns
+        self._maybe_compress_context()
+
         # 1. Retrieve memories — only keep sufficiently relevant ones (≥ 0.4 similarity)
         memories = self.long_term.retrieve_text(user_input, n_results=4, min_relevance=0.4)
 
@@ -109,6 +114,20 @@ class Brain:
         complexity = pre.get("complexity", "medium")
         self.introspection.on_interaction_start(complexity)
         logger.debug(f"Pre-flight: {pre}")
+
+        # 2b. Proactive web search when confidence is low on factual queries
+        if (
+            config.PROACTIVE_SEARCH_ENABLED
+            and pre.get("confidence_estimate", 1.0) < config.PROACTIVE_SEARCH_CONFIDENCE_THRESHOLD
+            and pre.get("task_type", "") in ("factual", "general", "knowledge")
+        ):
+            try:
+                extra = self.web_search.search_text(user_input, max_results=3)
+                if extra:
+                    memories = (memories + "\n\n[Proactive search]\n" + extra).strip()
+                    logger.info("Proactive search triggered (low pre-flight confidence).")
+            except Exception as e:
+                logger.debug(f"Proactive search failed: {e}")
 
         # 3. Build system prompt
         system_prompt = self._build_system_prompt(memories, pre)
@@ -313,6 +332,17 @@ class Brain:
             except Exception as e:
                 results.append(f"\n**[Plan: {goal}]** Error: {e}")
 
+        # Explicit memory storage
+        for m in _RE_MEMO.finditer(response):
+            text = m.group(1).strip()[:2000]  # bound to prevent oversized entries
+            logger.info(f"Tool: MEMO '{text[:60]}'")
+            try:
+                self.long_term.store(text, memory_type="explicit_memory")
+                self.self_model.record_capability_use("memory_management")
+                results.append(f"\n**[Memo saved]** {text[:100]}")
+            except Exception as e:
+                results.append(f"\n**[Memo error]** {e}")
+
         return "".join(results)
 
     # ------------------------------------------------------------------
@@ -493,6 +523,48 @@ class Brain:
             return self.llm.generate(prompt, temperature=0.4)
 
     # ------------------------------------------------------------------
+    # Context window compression — prevents silent context loss
+    # ------------------------------------------------------------------
+
+    def _maybe_compress_context(self) -> None:
+        """
+        If short-term memory is within 4 messages of its window limit, summarise
+        the oldest half of turns into a compact system message and evict them.
+        This prevents the ring-buffer from silently dropping important early context.
+        """
+        if not config.CONTEXT_COMPRESS_ENABLED:
+            return
+        if len(self.short_term) < config.MEMORY_MAX_SHORT_TERM - config.CONTEXT_COMPRESS_THRESHOLD_OFFSET:
+            return
+
+        msgs = self.short_term.get_messages()
+        half = max(1, len(msgs) // 2)
+        old_msgs = msgs[:half]
+        recent_msgs = msgs[half:]
+
+        transcript = "\n".join(
+            f"[{m.role.upper()}] {m.content[:300]}" for m in old_msgs
+        )
+        prompt = (
+            "Summarise the following conversation excerpt into 2-4 concise bullet points "
+            "capturing the most important context, facts, and decisions. "
+            "Reply with ONLY the bullet points, no preamble.\n\n"
+            f"{transcript}"
+        )
+        try:
+            summary = self.llm.fast_generate(prompt, temperature=0.1).strip()
+            self.short_term.clear()
+            self.short_term.add("system", f"[Earlier context summary]\n{summary}")
+            for msg in recent_msgs:
+                self.short_term.add(msg.role, msg.content, msg.metadata)
+            logger.info(
+                f"Context compressed: {half} turns summarised. "
+                f"Buffer: {len(msgs)} → {1 + len(recent_msgs)} messages."
+            )
+        except Exception as e:
+            logger.warning(f"Context compression failed: {e}")
+
+    # ------------------------------------------------------------------
     # Reflection cycle
     # ------------------------------------------------------------------
 
@@ -543,6 +615,7 @@ class Brain:
             "  [[SKILL: <name>|<arg>...]]   — invoke a loaded skill\n"
             "  [[CREATE_SKILL: <desc>]]     — generate and save a new skill\n"
             "  [[PLAN: <goal>]]             — decompose a goal into an ordered plan\n"
+            "  [[MEMO: <text>]]             — explicitly save a fact to long-term memory\n"
             "Results will be appended automatically after your response."
         )
 

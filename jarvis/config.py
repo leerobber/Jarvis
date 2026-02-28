@@ -43,6 +43,21 @@ class Config:
     REFLECTION_INTERVAL: int = int(os.getenv("REFLECTION_INTERVAL", "5"))
     SELF_IMPROVE_ENABLED: bool = os.getenv("SELF_IMPROVE_ENABLED", "true").lower() == "true"
 
+    # Context window compression
+    # When short-term memory is near-full, the oldest half of turns is summarised
+    # into a compact system message to prevent silent context loss.
+    CONTEXT_COMPRESS_ENABLED: bool = os.getenv("CONTEXT_COMPRESS_ENABLED", "true").lower() == "true"
+    # Compression triggers when the buffer is within this many messages of its limit.
+    CONTEXT_COMPRESS_THRESHOLD_OFFSET: int = int(os.getenv("CONTEXT_COMPRESS_THRESHOLD_OFFSET", "4"))
+
+    # Proactive web search
+    # When pre-flight confidence is below this threshold on a factual query,
+    # Jarvis automatically searches before generating a response.
+    PROACTIVE_SEARCH_ENABLED: bool = os.getenv("PROACTIVE_SEARCH_ENABLED", "true").lower() == "true"
+    PROACTIVE_SEARCH_CONFIDENCE_THRESHOLD: float = float(
+        os.getenv("PROACTIVE_SEARCH_CONFIDENCE_THRESHOLD", "0.35")
+    )
+
     # Paths
     SKILLS_PATH: Path = BASE_DIR / "data" / "skills"
     SELF_MODEL_PATH: Path = BASE_DIR / "data" / "self_model.json"
