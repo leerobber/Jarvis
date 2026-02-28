@@ -114,15 +114,37 @@ python main.py --model mistral
 | `/help` | Show all commands |
 | `/status` | Show self-model, internal state, memory/skill counts |
 | `/memory` | Show recent long-term memory entries |
+| `/consolidate` | Merge near-duplicate memories to keep the store lean |
 | `/skills` | List all dynamically learned skills |
+| `/teach <description>` | Create and validate a new skill from a one-line description |
 | `/search <query>` | Web search via DuckDuckGo |
-| `/run <code>` | Execute Python code in sandbox |
+| `/run <code>` | Execute Python code in sandbox (with auto-debug retry) |
+| `/file <op> <path> [content]` | File operations: read, write, append, list, delete |
 | `/plan <goal>` | Decompose a goal into an executable plan |
+| `/execute <goal>` | Plan AND automatically execute a task step-by-step |
 | `/reflect` | Manually trigger a reflection cycle |
 | `/voice` | Toggle voice input/output |
 | `/clear` | Clear short-term conversation memory |
 | `/save <text>` | Save a note to long-term memory |
 | `/quit` | Exit (runs final reflection before closing) |
+
+---
+
+## Inline Tool Calls
+
+You can embed tool calls directly in your chat messages or ask Jarvis to use them:
+
+| Syntax | Description |
+|---|---|
+| `[[SEARCH: <query>]]` | Search the web via DuckDuckGo |
+| `[[CODE: <python code>]]` | Execute Python (auto-debugged on error, up to `CODE_DEBUG_RETRIES` times) |
+| `[[FILE: read\|<path>]]` | Read a file from the workspace |
+| `[[FILE: write\|<path>\|<text>]]` | Write a file to the workspace |
+| `[[FILE: list\|<dir>]]` | List files in a workspace directory |
+| `[[SKILL: <name>\|<arg>...]]` | Invoke a loaded skill |
+| `[[CREATE_SKILL: <description>]]` | Generate, save, and validate a new skill |
+
+Results are appended automatically after the response.
 
 ---
 
@@ -133,11 +155,15 @@ python main.py --model mistral
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_MODEL` | `llama3.2` | Chat model |
 | `OLLAMA_EMBED_MODEL` | `nomic-embed-text` | Embedding model for memory |
+| `OLLAMA_FAST_MODEL` | _(empty — uses main model)_ | Smaller/faster model for internal reasoning (metacognition, critic, planner) |
 | `VOICE_ENABLED` | `false` | Enable voice I/O |
 | `VOICE_WHISPER_MODEL` | `base` | Whisper model size |
 | `REFLECTION_INTERVAL` | `5` | Reflect every N interactions |
 | `CODE_EXEC_ENABLED` | `true` | Allow sandboxed code execution |
+| `CODE_DEBUG_RETRIES` | `3` | Times to retry auto-fixing broken code before giving up |
+| `CRITIC_ENABLED` | `true` | Run think-twice quality check on every non-trivial response |
 | `MEMORY_MAX_SHORT_TERM` | `20` | Conversation window size |
+| `MEMORY_CONSOLIDATION_INTERVAL` | `20` | Consolidate near-duplicate memories every N interactions (0 = disabled) |
 
 ---
 
@@ -147,6 +173,7 @@ python main.py --model mistral
 |---|---|
 | `data/self_model.json` | Jarvis's persistent self-knowledge |
 | `data/meta_prompt.txt` | Evolving system prompt (grows with learning) |
+| `data/introspection_state.json` | Persistent internal state (mood, fatigue, confidence) |
 | `data/memory/` | ChromaDB vector store |
 | `data/skills/` | Dynamically created Python skill files |
 | `data/logs/jarvis.log` | Session logs |
