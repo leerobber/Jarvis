@@ -23,6 +23,7 @@ Tool-call syntax for the LLM:
   [[FILE: list|<directory>]]
   [[SKILL: <name>|<arg1>|<arg2>...]]
   [[CREATE_SKILL: <one-line description>]]
+  [[PLAN: <goal>]]
 """
 from __future__ import annotations
 
@@ -56,6 +57,7 @@ _RE_CODE   = re.compile(r"\[\[CODE:\s*(.*?)\]\]", re.DOTALL)
 _RE_FILE   = re.compile(r"\[\[FILE:\s*(.*?)\]\]", re.DOTALL)
 _RE_SKILL  = re.compile(r"\[\[SKILL:\s*(.*?)\]\]", re.DOTALL)
 _RE_CREATE = re.compile(r"\[\[CREATE_SKILL:\s*(.*?)\]\]", re.DOTALL)
+_RE_PLAN   = re.compile(r"\[\[PLAN:\s*(.*?)\]\]", re.DOTALL)
 
 
 class Brain:
@@ -99,8 +101,8 @@ class Brain:
         self._interaction_count += 1
         self.self_model.increment_interactions()
 
-        # 1. Retrieve memories
-        memories = self.long_term.retrieve_text(user_input, n_results=4)
+        # 1. Retrieve memories — only keep sufficiently relevant ones (≥ 0.4 similarity)
+        memories = self.long_term.retrieve_text(user_input, n_results=4, min_relevance=0.4)
 
         # 2. Pre-flight metacognition
         pre = self.metacognition.pre_flight(user_input, context=memories)
@@ -158,6 +160,13 @@ class Brain:
                     f"Critique of response to '{user_input[:80]}': {issues}",
                     memory_type="self_critique",
                 )
+                # Store the critic's improved version so future retrievals benefit
+                revised = (critique.get("revised") or "").strip()
+                if revised:
+                    self.long_term.store(
+                        f"Improved response to '{user_input[:80]}': {revised[:600]}",
+                        memory_type="corrected_response",
+                    )
 
         # Record in short-term memory
         self.short_term.add_assistant(response)
@@ -166,6 +175,10 @@ class Brain:
         post = self.metacognition.post_flight(user_input, response)
         quality = post.get("quality_score", 0.5)
         logger.debug(f"Post-flight quality={quality:.2f}: {post}")
+
+        # Persist improvement suggestions so they accumulate in the self-model
+        for suggestion in post.get("improvement_suggestions", [])[:3]:
+            self.self_model.add_meta_note(f"Improvement: {suggestion}")
 
         # Update introspection state
         if quality >= 0.6:
@@ -284,6 +297,21 @@ class Brain:
                 results.append(f"\n**[New skill created: `{name}`]**")
             else:
                 results.append(f"\n**[Skill creation failed]** Could not generate a working skill.")
+
+        # Inline planning
+        for m in _RE_PLAN.finditer(response):
+            goal = m.group(1).strip()
+            logger.info(f"Tool: PLAN '{goal}'")
+            try:
+                plan = self.planner.plan(goal, _AVAILABLE_TOOLS)
+                self.self_model.record_capability_use("task_planning")
+                results.append(f"\n**[Plan for: {goal}]**\n{plan.summary()}")
+                self.long_term.store(
+                    f"Plan created for goal '{goal[:80]}': {plan.summary()[:400]}",
+                    memory_type="plan",
+                )
+            except Exception as e:
+                results.append(f"\n**[Plan: {goal}]** Error: {e}")
 
         return "".join(results)
 
@@ -500,6 +528,10 @@ class Brain:
         if approach:
             parts.append(f"\n## Current task strategy\n{approach}")
 
+        goals = self.self_model.get("current_goals") or []
+        if goals:
+            parts.append("\n## Current goals\n" + "\n".join(f"- {g}" for g in goals))
+
         parts.append(
             "\n## Inline tool calls\n"
             "You may embed tool calls directly in your response using these tags:\n"
@@ -510,6 +542,7 @@ class Brain:
             "  [[FILE: list|<dir>]]         — list files in workspace directory\n"
             "  [[SKILL: <name>|<arg>...]]   — invoke a loaded skill\n"
             "  [[CREATE_SKILL: <desc>]]     — generate and save a new skill\n"
+            "  [[PLAN: <goal>]]             — decompose a goal into an ordered plan\n"
             "Results will be appended automatically after your response."
         )
 

@@ -80,8 +80,14 @@ class LongTermMemory:
         query: str,
         n_results: int = 5,
         memory_type: Optional[str] = None,
+        min_relevance: float = 0.0,
     ) -> list[dict]:
-        """Return the top-N most semantically similar memories."""
+        """Return the top-N most semantically similar memories.
+
+        Args:
+            min_relevance: Minimum cosine-similarity score (0–1) a memory must
+                           have to be included.  Defaults to 0.0 (no filtering).
+        """
         embedding = self._ollama.embed(query)
         if not embedding:
             return []
@@ -100,17 +106,20 @@ class LongTermMemory:
 
         memories = []
         for i, doc in enumerate(results["documents"][0]):
+            relevance = 1 - results["distances"][0][i]
+            if relevance < min_relevance:
+                continue
             memories.append({
                 "id": results["ids"][0][i],
                 "text": doc,
                 "metadata": results["metadatas"][0][i],
-                "relevance": 1 - results["distances"][0][i],
+                "relevance": relevance,
             })
         return memories
 
-    def retrieve_text(self, query: str, n_results: int = 5) -> str:
+    def retrieve_text(self, query: str, n_results: int = 5, min_relevance: float = 0.0) -> str:
         """Convenience — returns memories as a formatted string."""
-        memories = self.retrieve(query, n_results)
+        memories = self.retrieve(query, n_results, min_relevance=min_relevance)
         if not memories:
             return ""
         lines = []

@@ -131,15 +131,35 @@ jarvis --help
 | `/help` | Show all commands |
 | `/status` | Show self-model, internal state, memory/skill counts |
 | `/memory` | Show recent long-term memory entries |
+| `/consolidate` | Merge redundant memories to keep the store lean |
 | `/skills` | List all dynamically learned skills |
 | `/search <query>` | Web search via DuckDuckGo |
 | `/run <code>` | Execute Python code in sandbox |
 | `/plan <goal>` | Decompose a goal into an executable plan |
+| `/execute <goal>` | Plan AND execute a goal automatically |
 | `/reflect` | Manually trigger a reflection cycle |
+| `/goals` | Show current goals |
+| `/goals <text>` | Append a new goal (shown in every system prompt) |
+| `/goals clear` | Clear all goals |
 | `/voice` | Toggle voice input/output |
 | `/clear` | Clear short-term conversation memory |
 | `/save <text>` | Save a note to long-term memory |
 | `/quit` | Exit (runs final reflection before closing) |
+
+### Inline tool calls (embed directly in chat)
+
+The LLM can invoke tools by embedding tags anywhere in its response:
+
+| Tag | Action |
+|---|---|
+| `[[SEARCH: <query>]]` | DuckDuckGo web search |
+| `[[CODE: <python>]]` | Execute Python (auto-debugged on error) |
+| `[[FILE: read\|<path>]]` | Read a file from the workspace |
+| `[[FILE: write\|<path>\|<text>]]` | Write a file to the workspace |
+| `[[FILE: list\|<dir>]]` | List workspace directory contents |
+| `[[SKILL: <name>\|<arg>...]]` | Invoke a loaded skill |
+| `[[CREATE_SKILL: <desc>]]` | Generate and save a new reusable skill |
+| `[[PLAN: <goal>]]` | Decompose a goal into a step-by-step plan |
 
 ---
 
