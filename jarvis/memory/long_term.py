@@ -85,8 +85,12 @@ class LongTermMemory:
         """Return the top-N most semantically similar memories.
 
         Args:
-            min_relevance: Minimum cosine-similarity score (0–1) a memory must
-                           have to be included.  Defaults to 0.0 (no filtering).
+            min_relevance: Minimum relevance score a memory must have to be
+                           included.  Relevance is computed as
+                           ``1 - cosine_distance``, where cosine_distance is
+                           in [0, 2], so relevance is in [-1, 1].  Positive
+                           values indicate meaningful similarity; a threshold
+                           around 0.3–0.5 is typical.  Defaults to 0.0.
         """
         embedding = self._ollama.embed(query)
         if not embedding:

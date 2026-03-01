@@ -189,5 +189,7 @@ class SelfModel:
         self._save()
 
     def set_goals(self, goals: list[str]) -> None:
-        self._data["current_goals"] = goals
+        # Cap count and per-goal length to prevent unbounded growth
+        capped = [g[:200] for g in goals[:10]]
+        self._data["current_goals"] = capped
         self._save()

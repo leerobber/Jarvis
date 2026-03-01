@@ -52,6 +52,10 @@ logger = logging.getLogger(__name__)
 
 _AVAILABLE_TOOLS = ["conversation", "code", "web_search", "file", "skill"]
 
+# Goals injected into the system prompt are capped to prevent unbounded token growth.
+_GOALS_MAX_COUNT = 10
+_GOALS_MAX_GOAL_LENGTH = 200
+
 # Regex patterns for inline tool calls
 _RE_SEARCH = re.compile(r"\[\[SEARCH:\s*(.*?)\]\]", re.DOTALL)
 _RE_CODE   = re.compile(r"\[\[CODE:\s*(.*?)\]\]", re.DOTALL)
@@ -602,7 +606,8 @@ class Brain:
 
         goals = self.self_model.get("current_goals") or []
         if goals:
-            parts.append("\n## Current goals\n" + "\n".join(f"- {g}" for g in goals))
+            capped = [g[:_GOALS_MAX_GOAL_LENGTH] for g in goals[:_GOALS_MAX_COUNT]]
+            parts.append("\n## Current goals\n" + "\n".join(f"- {g}" for g in capped))
 
         parts.append(
             "\n## Inline tool calls\n"
