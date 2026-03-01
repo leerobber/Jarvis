@@ -30,6 +30,8 @@ _COMMANDS = {
     "/plan":      "Plan a task: /plan <goal>",
     "/execute":   "Plan AND execute a task: /execute <goal>",
     "/reflect":   "Trigger a manual reflection cycle now",
+    "/goals":     "View/add/clear goals: /goals | /goals <text> | /goals clear",
+    "/history":   "Show the current conversation context window",
     "/voice":     "Toggle voice input mode",
     "/clear":     "Clear short-term conversation memory",
     "/save":      "Save a note to memory: /save <text>",
@@ -123,6 +125,8 @@ class CLI:
             "/plan":        lambda: self._cmd_plan(args),
             "/execute":     lambda: self._cmd_execute(args),
             "/reflect":     lambda: self._cmd_reflect(),
+            "/goals":       lambda: self._cmd_goals(args),
+            "/history":     lambda: self._cmd_history(),
             "/voice":       lambda: self._cmd_toggle_voice(),
             "/clear":       lambda: self._cmd_clear(),
             "/save":        lambda: self._cmd_save(args),
@@ -327,6 +331,47 @@ class CLI:
             console.print(f"[red]- {'; '.join(poor[:3])}[/red]")
         if directives:
             console.print(f"[cyan]New directives: {len(directives)} added to meta-prompt[/cyan]")
+        console.print()
+
+    def _cmd_goals(self, args: str) -> None:
+        sm = self._brain.self_model
+        args = args.strip()
+        if not args:
+            goals = sm.get("current_goals") or []
+            if not goals:
+                console.print("[dim]No current goals set. Use /goals <text> to add one.[/dim]")
+            else:
+                console.print("[bold]Current goals:[/bold]")
+                for i, g in enumerate(goals, 1):
+                    console.print(f"  [cyan]{i}.[/cyan] {g}")
+        elif args.lower() == "clear":
+            sm.set_goals([])
+            console.print("[dim]Goals cleared.[/dim]")
+        else:
+            current = sm.get("current_goals") or []
+            current.append(args)
+            sm.set_goals(current)
+            console.print(f"[green]Goal added:[/green] {args}")
+        console.print()
+
+    def _cmd_history(self) -> None:
+        msgs = self._brain.short_term.get_messages()
+        if not msgs:
+            console.print("[dim]No conversation history yet.[/dim]")
+            console.print()
+            return
+        console.print(
+            f"[bold]Context window[/bold] "
+            f"[dim]({len(msgs)}/{self._brain.short_term._buffer.maxlen} messages)[/dim]"
+        )
+        console.print()
+        for m in msgs:
+            if m.role == "user":
+                console.print(f"  [bold green]You>[/bold green]    {m.content[:200]}")
+            elif m.role == "assistant":
+                console.print(f"  [bold blue]Jarvis>[/bold blue] {m.content[:200]}")
+            elif m.role == "system":
+                console.print(f"  [dim][context] {m.content[:120]}[/dim]")
         console.print()
 
     def _cmd_toggle_voice(self) -> None:

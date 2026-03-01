@@ -23,6 +23,8 @@ Tool-call syntax for the LLM:
   [[FILE: list|<directory>]]
   [[SKILL: <name>|<arg1>|<arg2>...]]
   [[CREATE_SKILL: <one-line description>]]
+  [[PLAN: <goal>]]
+  [[MEMO: <text to remember>]]
 """
 from __future__ import annotations
 
@@ -50,12 +52,18 @@ logger = logging.getLogger(__name__)
 
 _AVAILABLE_TOOLS = ["conversation", "code", "web_search", "file", "skill"]
 
+# Goals injected into the system prompt are capped to prevent unbounded token growth.
+_GOALS_MAX_COUNT = 10
+_GOALS_MAX_GOAL_LENGTH = 200
+
 # Regex patterns for inline tool calls
 _RE_SEARCH = re.compile(r"\[\[SEARCH:\s*(.*?)\]\]", re.DOTALL)
 _RE_CODE   = re.compile(r"\[\[CODE:\s*(.*?)\]\]", re.DOTALL)
 _RE_FILE   = re.compile(r"\[\[FILE:\s*(.*?)\]\]", re.DOTALL)
 _RE_SKILL  = re.compile(r"\[\[SKILL:\s*(.*?)\]\]", re.DOTALL)
 _RE_CREATE = re.compile(r"\[\[CREATE_SKILL:\s*(.*?)\]\]", re.DOTALL)
+_RE_PLAN   = re.compile(r"\[\[PLAN:\s*(.*?)\]\]", re.DOTALL)
+_RE_MEMO   = re.compile(r"\[\[MEMO:\s*(.*?)\]\]", re.DOTALL)
 
 
 class Brain:
@@ -99,14 +107,31 @@ class Brain:
         self._interaction_count += 1
         self.self_model.increment_interactions()
 
-        # 1. Retrieve memories
-        memories = self.long_term.retrieve_text(user_input, n_results=4)
+        # 0. Compress context window before it silently loses old turns
+        self._maybe_compress_context()
+
+        # 1. Retrieve memories — only keep sufficiently relevant ones (≥ 0.4 similarity)
+        memories = self.long_term.retrieve_text(user_input, n_results=4, min_relevance=0.4)
 
         # 2. Pre-flight metacognition
         pre = self.metacognition.pre_flight(user_input, context=memories)
         complexity = pre.get("complexity", "medium")
         self.introspection.on_interaction_start(complexity)
         logger.debug(f"Pre-flight: {pre}")
+
+        # 2b. Proactive web search when confidence is low on factual queries
+        if (
+            config.PROACTIVE_SEARCH_ENABLED
+            and pre.get("confidence_estimate", 1.0) < config.PROACTIVE_SEARCH_CONFIDENCE_THRESHOLD
+            and pre.get("task_type", "") in ("factual", "general", "knowledge")
+        ):
+            try:
+                extra = self.web_search.search_text(user_input, max_results=3)
+                if extra:
+                    memories = (memories + "\n\n[Proactive search]\n" + extra).strip()
+                    logger.info("Proactive search triggered (low pre-flight confidence).")
+            except Exception as e:
+                logger.debug(f"Proactive search failed: {e}")
 
         # 3. Build system prompt
         system_prompt = self._build_system_prompt(memories, pre)
@@ -158,6 +183,13 @@ class Brain:
                     f"Critique of response to '{user_input[:80]}': {issues}",
                     memory_type="self_critique",
                 )
+                # Store the critic's improved version so future retrievals benefit
+                revised = (critique.get("revised") or "").strip()
+                if revised:
+                    self.long_term.store(
+                        f"Improved response to '{user_input[:80]}': {revised[:600]}",
+                        memory_type="corrected_response",
+                    )
 
         # Record in short-term memory
         self.short_term.add_assistant(response)
@@ -166,6 +198,10 @@ class Brain:
         post = self.metacognition.post_flight(user_input, response)
         quality = post.get("quality_score", 0.5)
         logger.debug(f"Post-flight quality={quality:.2f}: {post}")
+
+        # Persist improvement suggestions so they accumulate in the self-model
+        for suggestion in post.get("improvement_suggestions", [])[:3]:
+            self.self_model.add_meta_note(f"Improvement: {suggestion}")
 
         # Update introspection state
         if quality >= 0.6:
@@ -284,6 +320,32 @@ class Brain:
                 results.append(f"\n**[New skill created: `{name}`]**")
             else:
                 results.append(f"\n**[Skill creation failed]** Could not generate a working skill.")
+
+        # Inline planning
+        for m in _RE_PLAN.finditer(response):
+            goal = m.group(1).strip()
+            logger.info(f"Tool: PLAN '{goal}'")
+            try:
+                plan = self.planner.plan(goal, _AVAILABLE_TOOLS)
+                self.self_model.record_capability_use("task_planning")
+                results.append(f"\n**[Plan for: {goal}]**\n{plan.summary()}")
+                self.long_term.store(
+                    f"Plan created for goal '{goal[:80]}': {plan.summary()[:400]}",
+                    memory_type="plan",
+                )
+            except Exception as e:
+                results.append(f"\n**[Plan: {goal}]** Error: {e}")
+
+        # Explicit memory storage
+        for m in _RE_MEMO.finditer(response):
+            text = m.group(1).strip()[:2000]  # bound to prevent oversized entries
+            logger.info(f"Tool: MEMO '{text[:60]}'")
+            try:
+                self.long_term.store(text, memory_type="explicit_memory")
+                self.self_model.record_capability_use("memory_management")
+                results.append(f"\n**[Memo saved]** {text[:100]}")
+            except Exception as e:
+                results.append(f"\n**[Memo error]** {e}")
 
         return "".join(results)
 
@@ -465,6 +527,48 @@ class Brain:
             return self.llm.generate(prompt, temperature=0.4)
 
     # ------------------------------------------------------------------
+    # Context window compression — prevents silent context loss
+    # ------------------------------------------------------------------
+
+    def _maybe_compress_context(self) -> None:
+        """
+        If short-term memory is within 4 messages of its window limit, summarise
+        the oldest half of turns into a compact system message and evict them.
+        This prevents the ring-buffer from silently dropping important early context.
+        """
+        if not config.CONTEXT_COMPRESS_ENABLED:
+            return
+        if len(self.short_term) < config.MEMORY_MAX_SHORT_TERM - config.CONTEXT_COMPRESS_THRESHOLD_OFFSET:
+            return
+
+        msgs = self.short_term.get_messages()
+        half = max(1, len(msgs) // 2)
+        old_msgs = msgs[:half]
+        recent_msgs = msgs[half:]
+
+        transcript = "\n".join(
+            f"[{m.role.upper()}] {m.content[:300]}" for m in old_msgs
+        )
+        prompt = (
+            "Summarise the following conversation excerpt into 2-4 concise bullet points "
+            "capturing the most important context, facts, and decisions. "
+            "Reply with ONLY the bullet points, no preamble.\n\n"
+            f"{transcript}"
+        )
+        try:
+            summary = self.llm.fast_generate(prompt, temperature=0.1).strip()
+            self.short_term.clear()
+            self.short_term.add("system", f"[Earlier context summary]\n{summary}")
+            for msg in recent_msgs:
+                self.short_term.add(msg.role, msg.content, msg.metadata)
+            logger.info(
+                f"Context compressed: {half} turns summarised. "
+                f"Buffer: {len(msgs)} → {1 + len(recent_msgs)} messages."
+            )
+        except Exception as e:
+            logger.warning(f"Context compression failed: {e}")
+
+    # ------------------------------------------------------------------
     # Reflection cycle
     # ------------------------------------------------------------------
 
@@ -500,6 +604,11 @@ class Brain:
         if approach:
             parts.append(f"\n## Current task strategy\n{approach}")
 
+        goals = self.self_model.get("current_goals") or []
+        if goals:
+            capped = [g[:_GOALS_MAX_GOAL_LENGTH] for g in goals[:_GOALS_MAX_COUNT]]
+            parts.append("\n## Current goals\n" + "\n".join(f"- {g}" for g in capped))
+
         parts.append(
             "\n## Inline tool calls\n"
             "You may embed tool calls directly in your response using these tags:\n"
@@ -510,6 +619,8 @@ class Brain:
             "  [[FILE: list|<dir>]]         — list files in workspace directory\n"
             "  [[SKILL: <name>|<arg>...]]   — invoke a loaded skill\n"
             "  [[CREATE_SKILL: <desc>]]     — generate and save a new skill\n"
+            "  [[PLAN: <goal>]]             — decompose a goal into an ordered plan\n"
+            "  [[MEMO: <text>]]             — explicitly save a fact to long-term memory\n"
             "Results will be appended automatically after your response."
         )
 

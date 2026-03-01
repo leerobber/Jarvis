@@ -63,7 +63,9 @@ class Reflector:
             "  new_knowledge_gained: array of strings\n"
             "  behavioral_directives: array of short imperative instructions "
             "  to improve future behavior (e.g. 'Always verify factual claims before stating them')\n"
-            "  capability_updates: object mapping capability names to confidence deltas (e.g. {'code_generation': 0.05})\n\n"
+            "  capability_updates: object mapping capability names to confidence deltas (e.g. {'code_generation': 0.05})\n"
+            "  knowledge_domains: object mapping snake_case domain names to confidence 0.0-1.0 "
+            "  (e.g. {'python_programming': 0.8, 'user_preferences': 0.7}) — topics covered in this session\n\n"
             "Only valid JSON — no markdown, no explanation."
         )
         try:
@@ -81,6 +83,7 @@ class Reflector:
             "new_knowledge_gained": [],
             "behavioral_directives": [],
             "capability_updates": {},
+            "knowledge_domains": {},
         }
 
     # ------------------------------------------------------------------
@@ -130,6 +133,12 @@ class Reflector:
 
         for mistake in report.get("recurring_mistakes", []):
             self._self_model.add_meta_note(f"Recurring issue: {mistake}")
+
+        for domain, conf in report.get("knowledge_domains", {}).items():
+            try:
+                self._self_model.add_knowledge_domain(str(domain), float(conf))
+            except (ValueError, TypeError):
+                pass
 
     # ------------------------------------------------------------------
     # Step 4: Store reflection in long-term memory

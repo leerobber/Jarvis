@@ -74,13 +74,15 @@ ollama pull llama3.2
 ollama pull nomic-embed-text    # for long-term memory embeddings
 ```
 
-### 2. Clone and install dependencies
+### 2. Clone and install the package
 
 ```bash
 git clone https://github.com/leerobber/Jarvis
 cd Jarvis
-pip install -r requirements.txt
+pip install -e .
 ```
+
+> **Alternative (no install):** `pip install -r requirements.txt` still works; use `python main.py` to launch.
 
 ### 3. Configure
 
@@ -89,21 +91,36 @@ cp .env.example .env
 # Edit .env — set OLLAMA_MODEL, enable VOICE_ENABLED, etc.
 ```
 
-### 4. Run
+### 4. Verify your environment
 
 ```bash
-python main.py
+jarvis doctor
+```
+
+This checks that Ollama is reachable, the configured model is pulled, and all data directories are writable.  Fix any issues reported before proceeding.
+
+### 5. Run
+
+```bash
+jarvis
 ```
 
 With voice mode enabled at startup:
 ```bash
-python main.py --voice
+jarvis --voice
 ```
 
 Override the model:
 ```bash
-python main.py --model mistral
+jarvis --model mistral
 ```
+
+Show all flags:
+```bash
+jarvis --help
+```
+
+> **Backwards-compatible:** `python main.py` continues to work exactly as before.
 
 ---
 
@@ -114,15 +131,37 @@ python main.py --model mistral
 | `/help` | Show all commands |
 | `/status` | Show self-model, internal state, memory/skill counts |
 | `/memory` | Show recent long-term memory entries |
+| `/consolidate` | Merge redundant memories to keep the store lean |
 | `/skills` | List all dynamically learned skills |
 | `/search <query>` | Web search via DuckDuckGo |
 | `/run <code>` | Execute Python code in sandbox |
 | `/plan <goal>` | Decompose a goal into an executable plan |
+| `/execute <goal>` | Plan AND execute a goal automatically |
 | `/reflect` | Manually trigger a reflection cycle |
+| `/goals` | Show current goals |
+| `/goals <text>` | Append a new goal (shown in every system prompt) |
+| `/goals clear` | Clear all goals |
+| `/history` | Show the current conversation context window |
 | `/voice` | Toggle voice input/output |
 | `/clear` | Clear short-term conversation memory |
 | `/save <text>` | Save a note to long-term memory |
 | `/quit` | Exit (runs final reflection before closing) |
+
+### Inline tool calls (embed directly in chat)
+
+The LLM can invoke tools by embedding tags anywhere in its response:
+
+| Tag | Action |
+|---|---|
+| `[[SEARCH: <query>]]` | DuckDuckGo web search |
+| `[[CODE: <python>]]` | Execute Python (auto-debugged on error) |
+| `[[FILE: read\|<path>]]` | Read a file from the workspace |
+| `[[FILE: write\|<path>\|<text>]]` | Write a file to the workspace |
+| `[[FILE: list\|<dir>]]` | List workspace directory contents |
+| `[[SKILL: <name>\|<arg>...]]` | Invoke a loaded skill |
+| `[[CREATE_SKILL: <desc>]]` | Generate and save a new reusable skill |
+| `[[PLAN: <goal>]]` | Decompose a goal into a step-by-step plan |
+| `[[MEMO: <text>]]` | Explicitly save a fact to long-term memory |
 
 ---
 
@@ -138,6 +177,9 @@ python main.py --model mistral
 | `REFLECTION_INTERVAL` | `5` | Reflect every N interactions |
 | `CODE_EXEC_ENABLED` | `true` | Allow sandboxed code execution |
 | `MEMORY_MAX_SHORT_TERM` | `20` | Conversation window size |
+| `CONTEXT_COMPRESS_ENABLED` | `true` | Summarise old turns when context window fills up |
+| `PROACTIVE_SEARCH_ENABLED` | `true` | Auto-search web when pre-flight confidence is low |
+| `PROACTIVE_SEARCH_CONFIDENCE_THRESHOLD` | `0.35` | Confidence level below which proactive search fires |
 
 ---
 
